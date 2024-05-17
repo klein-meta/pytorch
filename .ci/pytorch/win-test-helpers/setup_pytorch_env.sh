@@ -28,10 +28,8 @@ else
 fi
 chmod +x temp.bat
 ./temp.bat
-cat env.sh
 source env.sh
-rm temp.bat
-rm env.sh
+rm temp.bat env.sh
 
 popd
 
