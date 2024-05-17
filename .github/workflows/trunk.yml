@@ -19,6 +19,20 @@ concurrency:
 permissions: read-all
 
 jobs:
+  llm-td:
+    name: before-test
+    uses: ./.github/workflows/llm_td_retrieval.yml
+    permissions:
+      id-token: write
+      contents: read
+
+  target-determination:
+    name: before-test
+    uses: ./.github/workflows/target_determination.yml
+    needs: llm-td
+    permissions:
+      id-token: write
+      contents: read
   win-vs2019-cpu-py3-build:
     name: win-vs2019-cpu-py3
     uses: ./.github/workflows/_win-build.yml
@@ -38,6 +52,7 @@ jobs:
     uses: ./.github/workflows/_win-test.yml
     needs:
       - win-vs2019-cpu-py3-build
+      - target-determination
     with:
       build-environment: win-vs2019-cpu-py3
       cuda-version: cpu
