@@ -17,10 +17,8 @@ if [[ "${SHARD_NUMBER}" == "1" ]]; then
 fi
 
 echo Copying over additional ci files
-LINUX_PYTORCH_FINAL_PACKAGE_DIR_WIN=$(cygpath -w "${PYTORCH_FINAL_PACKAGE_DIR_WIN}")
-LINUX_PROJECT_DIR_WIN=$(cygpath -w "${PROJECT_DIR_WIN}")
 
-cp -r "$LINUX_PYTORCH_FINAL_PACKAGE_DIR_WIN"/.additional_ci_files "$LINUX_PROJECT_DIR_WIN"/.additional_ci_files
+cp -r "$PYTORCH_FINAL_PACKAGE_DIR"/.additional_ci_files "$PROJECT_DIR"/.additional_ci_files
 
 time python run_test.py --exclude-jit-executor --exclude-distributed-tests --shard "$SHARD_NUMBER" "$NUM_TEST_SHARDS" --verbose
 popd

@@ -5,8 +5,6 @@ export PATH="/c/Program Files/CMake/bin;/c/Program Files/7-Zip;/c/ProgramData/ch
 # Install Miniconda3
 export INSTALLER_DIR="$SCRIPT_HELPERS_DIR"/installation-helpers
 
-LINUX_TMP_DIR_WIN=$(cygpath -u "${TMP_DIR_WIN}")
-
 # Miniconda has been installed as part of the Windows AMI with all the dependencies.
 # We just need to activate it here
 # shellcheck disable=SC1091
@@ -17,7 +15,7 @@ source "$INSTALLER_DIR"/activate_miniconda3.sh
 # build\torch. Rather than changing all these references, making a copy of torch folder
 # from conda to the current workspace is easier. The workspace will be cleaned up after
 # the job anyway
-cp -r "$CONDA_PARENT_DIR/Miniconda3/Lib/site-packages/torch" "$LINUX_TMP_DIR_WIN/build/torch/"
+cp -r "$CONDA_PARENT_DIR/Miniconda3/Lib/site-packages/torch" "$TMP_DIR/build/torch/"
 
 pushd .
 
@@ -57,5 +55,5 @@ if [[ "${USE_CUDA}" == "1" ]]; then
 
 fi
 
-export PYTHONPATH="$LINUX_TMP_DIR_WIN/build;$PYTHONPATH"
+export PYTHONPATH="$TMP_DIR/build;$PYTHONPATH"
 env
