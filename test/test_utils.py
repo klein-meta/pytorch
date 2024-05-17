@@ -191,7 +191,6 @@ class TestCheckpoint(TestCase):
         self.assertEqual(grads_no_checkpoint, grads_checkpoint)
 
     def test_checkpoint(self):
-        self.assertEqual(1, 2)
         for use_reentrant in [True, False]:
             with self.subTest(use_reentrant=use_reentrant):
                 model = nn.Sequential(

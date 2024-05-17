@@ -21,6 +21,8 @@ cp -r "$CONDA_PARENT_DIR/Miniconda3/Lib/site-packages/torch" "$LINUX_TMP_DIR_WIN
 
 pushd .
 
+# Get all the environment variables set by vcvarsall.bat and set them in the
+# current shell
 if [[ -z "$VC_VERSION" ]]; then
   echo "call \"C:/Program Files (x86)/Microsoft Visual Studio/$VC_YEAR/$VC_PRODUCT/VC/Auxiliary/Build/vcvarsall.bat\" x64 && bash -c export > env.sh" > temp.bat
 else
