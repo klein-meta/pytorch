@@ -369,6 +369,10 @@ def _correct_storage_aliasing(func, schema_info, args, outs):
         if is_traceable_wrapper_subclass(arg) or is_traceable_wrapper_subclass(ret):
             ret_list = ret if isinstance(ret, list) else [ret]
             for r in ret_list:
+                # NJTs have known dense -> subclass and subclass -> dense views, so
+                # skip the type check asserts for those
+                if arg.is_nested or r.is_nested:
+                    continue
                 assert type(arg) == type(
                     r
                 ), f"""Called {str(func)} with input of type {type(arg)}
@@ -393,22 +397,10 @@ and output of type {type(ret)}. But expected types to match."""
 
                 if isinstance(ret, list):
                     for r in ret:
-                        torch.ops.aten.set_.source_Storage_storage_offset(
-                            r,
-                            arg.untyped_storage(),
-                            r.storage_offset(),
-                            r.shape,
-                            r.stride(),
-                        )
+                        torch._C._unsafe_set_storage(r, arg.untyped_storage())
                 else:
                     assert isinstance(ret, torch.Tensor), f"type: {type(ret)}"
-                    torch.ops.aten.set_.source_Storage_storage_offset(
-                        ret,
-                        arg.untyped_storage(),
-                        ret.storage_offset(),
-                        ret.shape,
-                        ret.stride(),
-                    )
+                    torch._C._unsafe_set_storage(ret, arg.untyped_storage())
             finally:
                 torch._C._set_meta_in_tls_dispatch_include(meta_in_tls)
 
