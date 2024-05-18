@@ -393,7 +393,13 @@ class SymNode:
     def guard_bool(self, file, line):
         # TODO: use the file/line for some useful diagnostic on why a
         # guard occurred
-        r = self.shape_env.evaluate_expr(self.expr, self.hint, fx_node=self.fx_node)
+        # turn explicit guards into runtime asserts for export
+        if not self.shape_env.allow_complex_guards_as_runtime_asserts:
+            r = self.shape_env.evaluate_expr(self.expr, self.hint, fx_node=self.fx_node)
+        else:
+            r = self.shape_env.defer_runtime_assert(
+                self.expr, f"{file}:{line}", fx_node=self.fx_node
+            )
         try:
             return bool(r)
         except Exception:

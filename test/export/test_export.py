@@ -4747,9 +4747,9 @@ def forward(self, x, y):
         }
         export(f, (inputs,), dynamic_shapes=dynamic_shapes)
 
-    def test_disable_forced_specializations(self):
-        # case 1
-        # check disable_forced_specializations flag behaves correctly
+    def test_allow_complex_guards_as_runtime_asserts(self):
+        # check allow_complex_guards_as_runtime_asserts flag behaves correctly
+        # case 1: modulo guards
         from torch.export import dims
 
         class Mod4Reshape(torch.nn.Module):
@@ -4764,31 +4764,31 @@ def forward(self, x, y):
             r".*dx = .* must be specialized to 10 because the guards generated for it are too complex(.*\n)*"
             r".*dy = .* must be specialized to 72 because the guards generated for it are too complex(.*\n)*",
         ):
-            torch.export._trace._export(
+            export(
                 Mod4Reshape(),
                 inputs,
                 dynamic_shapes={"x": (dx, dy)},
-                strict=False,
-                _disable_forced_specializations=False,
             )
-        ep = torch.export._trace._export(
-            Mod4Reshape(),
-            inputs,
-            dynamic_shapes={"x": (dx, dy)},
-            strict=False,
-            _disable_forced_specializations=True,
-        )
-        out1 = ep.module()(torch.randn(8, 7))
-        self.assertEqual(out1.shape, torch.ones(7, 4, 2).shape)
-        out2 = ep.module()(torch.randn(4, 3))
-        self.assertEqual(out2.shape, torch.ones(3, 4, 1).shape)
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"shape .*7, 4, -1.* is invalid for input of size 64",
-        ):
-            ep.module()(torch.randn(8, 8))  # fail
 
-        # case 2
+        for _strict in [True, False]:  # patching doesn't work for private export API
+            ep = torch.export._trace._export(
+                Mod4Reshape(),
+                inputs,
+                dynamic_shapes={"x": (dx, dy)},
+                strict=_strict,
+                allow_complex_guards_as_runtime_asserts=True,
+            )
+            out1 = ep.module()(torch.randn(8, 7))
+            self.assertEqual(out1.shape, torch.ones(7, 4, 2).shape)
+            out2 = ep.module()(torch.randn(4, 3))
+            self.assertEqual(out2.shape, torch.ones(3, 4, 1).shape)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Eq\(Mod\(s0\*s1, 4\*s0 \- 4\), 0\) on node 'eq'",
+            ):
+                ep.module()(torch.randn(8, 8))  # fail
+
+        # case 2: 2d reshape
         class FreeReshape(torch.nn.Module):
             def forward(self, x, y, z):
                 return x.reshape([-1]) + y.reshape([-1]) + z  # s0*s1 = s2*s3 = s4
@@ -4799,9 +4799,9 @@ def forward(self, x, y):
             torch.randn(48),
         )
         dynamic_shapes = {
-            "x": [Dim(f"dx{i}") for i in range(2)],
-            "y": [Dim(f"dy{i}") for i in range(2)],
-            "z": [Dim(f"dz{i}") for i in range(1)],
+            "x": [Dim(f"dx{i}", min=2) for i in range(2)],
+            "y": [Dim(f"dy{i}", min=2) for i in range(2)],
+            "z": [Dim(f"dz{i}", min=4) for i in range(1)],
         }
         with self.assertRaisesRegex(  # this will force specialize
             torch._dynamo.exc.UserError,
@@ -4809,32 +4809,76 @@ def forward(self, x, y):
             r".*dx0 = .* must be specialized to 6 because the guards generated for it are too complex(.*\n)*"
             r".*dx1 = .* must be specialized to 8 because the guards generated for it are too complex(.*\n)*",
         ):
-            torch.export._trace._export(
+            export(
                 FreeReshape(),
                 inputs,
                 dynamic_shapes=dynamic_shapes,
-                strict=False,
-                _disable_forced_specializations=False,
             )
-        ep = torch.export._trace._export(
-            FreeReshape(),
-            inputs,
-            dynamic_shapes=dynamic_shapes,
-            strict=False,
-            _disable_forced_specializations=True,
-        )
-        out1 = ep.module()(torch.randn(48, 1), torch.randn(4, 12), torch.randn(48))
-        self.assertEqual(out1.shape, torch.ones(48).shape)
-        out2 = ep.module()(torch.randn(5, 8), torch.randn(4, 10), torch.randn(40))
-        self.assertEqual(out2.shape, torch.ones(40).shape)
-        with self.assertRaisesRegex(
-            RuntimeError,
-            r"The size of tensor a .* must match the size of tensor b .* at non-singleton dimension 0",
-        ):  # fail only at runtime
-            ep.module()(torch.randn(5, 8), torch.randn(4, 5), torch.randn(30))  # fail
 
-    def test_disable_forced_specializations_errors(self):
-        # check error messages with disable_forced_specializations=False/True
+        for _strict in [True, False]:
+            ep = torch.export._trace._export(
+                FreeReshape(),
+                inputs,
+                dynamic_shapes=dynamic_shapes,
+                strict=_strict,
+                allow_complex_guards_as_runtime_asserts=True,
+            )
+            out1 = ep.module()(torch.randn(48, 1), torch.randn(4, 12), torch.randn(48))
+            self.assertEqual(out1.shape, torch.ones(48).shape)
+            out2 = ep.module()(torch.randn(5, 8), torch.randn(4, 10), torch.randn(40))
+            self.assertEqual(out2.shape, torch.ones(40).shape)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Eq\(s0\*s1 \- s2\*s3, 0\) on node 'eq'",
+            ):  # fail only at runtime
+                ep.module()(torch.randn(5, 8), torch.randn(4, 5), torch.randn(30))  # fail
+
+        # case 3: 3d reshape (previously failing with different issue)
+        class Reshape3d(torch.nn.Module):
+            def forward(self, x, y):
+                return x.reshape([-1]) + y  # s0*s1*s2 = s3
+
+        inputs = (
+            torch.randn(4, 3, 2),
+            torch.randn(24),
+        )
+        dynamic_shapes = {
+            "x": (Dim("dx0", min=2), Dim("dx1", min=2), Dim("dx2", min=2)),
+            "y": (Dim("dy", min=8),),
+        }
+        with self.assertRaisesRegex(  # this will force specialize
+            torch._dynamo.exc.UserError,
+            r".*Specializations unexpectedly required(.*\n)*"
+            r"Suggested fixes:(.*\n)*"
+            r".*dx0 = 4(.*\n)*"
+            r".*dx1 = 3(.*\n)*"
+            r".*dx2 = 2(.*\n)*"
+            r".*dy = 24(.*\n)*",
+        ):
+            export(
+                Reshape3d(),
+                inputs,
+                dynamic_shapes=dynamic_shapes,
+            )
+
+        for _strict in [True, False]:
+            ep = torch.export._trace._export(
+                Reshape3d(),
+                inputs,
+                dynamic_shapes=dynamic_shapes,
+                strict=_strict,
+                allow_complex_guards_as_runtime_asserts=True,
+            )
+            out1 = ep.module()(torch.randn(9, 7, 2), torch.randn(126))
+            self.assertEqual(out1.shape, torch.ones(126).shape)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Eq\(s0\*s1\*s2 \- s3, 0\) on node 'eq'",
+            ):  # fail only at runtime
+                ep.module()(torch.randn(4, 3, 2), torch.randn(10))  # fail
+
+    def test_allow_complex_guards_as_runtime_asserts_errors(self):
+        # check error messages with allow_complex_guards_as_runtime_asserts = False/True
         class Foo(torch.nn.Module):
             def forward(self, w, x, y, z):
                 return w.reshape([-1]) + x, y + z  # simple: s0*s1 = s2, s3 = s4
@@ -4851,7 +4895,7 @@ def forward(self, x, y):
             "y": [Dim("dy")],  # y & z incorrect, export is supposed to fail.
             "z": [Dim("dz")],  # suggested fix should be to match these up.
         }
-        with self.assertRaisesRegex(  # if disable=False, suggested fixes should specialize 3, 4, 12.
+        with self.assertRaisesRegex(  # if allow = False, suggested fixes should specialize 3, 4, 12.
             torch._dynamo.exc.UserError,
             r".*Specializations unexpectedly required(.*\n)*"
             r"Suggested fixes:(.*\n)*"
@@ -4866,9 +4910,9 @@ def forward(self, x, y):
                 inputs,
                 dynamic_shapes=dynamic_shapes,
                 strict=False,
-                _disable_forced_specializations=False,
+                allow_complex_guards_as_runtime_asserts=False,
             )
-        with self.assertRaisesRegex(  # if disable=True, suggested fixes should not specialize.
+        with self.assertRaisesRegex(  # if allow = True, suggested fixes should not specialize.
             torch._dynamo.exc.UserError,
             r".*Constraints violated(.*\n)*"
             r"Suggested fixes:(.*\n)*"
@@ -4882,8 +4926,59 @@ def forward(self, x, y):
                 inputs,
                 dynamic_shapes=dynamic_shapes,
                 strict=False,
-                _disable_forced_specializations=True,
+                allow_complex_guards_as_runtime_asserts=True,
             )
+
+    def test_allow_explicit_guards_as_runtime_asserts(self):
+        # check that explicit guards are treated as runtime assertions
+        class Foo(torch.nn.Module):
+            def forward(self, x, y):
+                if x.shape[0] ** 2 == y.shape[0] * 3:
+                    return x * 2.0, y * 3.0
+
+        inputs = (torch.randn(6), torch.randn(12))
+        dynamic_shapes = {"x": [Dim("dx")], "y": [Dim("dy")]}
+        for _strict in [True, False]:  # patching doesn't work for private export API
+            ep = torch.export._trace._export(
+                Foo(),
+                inputs,
+                dynamic_shapes=dynamic_shapes,
+                strict=_strict,
+                allow_complex_guards_as_runtime_asserts=True,
+            )
+            # check forward pass
+            out0, out1 = ep.module()(torch.randn(9), torch.randn(27))
+            self.assertEqual(out0.shape, torch.ones(9).shape)
+            self.assertEqual(out1.shape, torch.ones(27).shape)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Eq\(s0\**2 \- 3\*s1, 0\)",
+            ):  # fail only at runtime
+                ep.module()(torch.randn(4), torch.randn(4))  # fail
+
+        # check unbacked symint + not equal guards
+        class Foo(torch.nn.Module):
+            def forward(self, x, y):
+                n = y.item()
+                if x.shape[0] != n * 2:
+                    return x * 2 + n
+
+        inputs = (torch.randn(10), torch.tensor(4))
+        dynamic_shapes = {"x": [Dim("dx")], "y": None}
+        for _strict in [True, False]:  # patching doesn't work for private export API
+            ep = torch.export._trace._export(
+                Foo(),
+                inputs,
+                dynamic_shapes=dynamic_shapes,
+                strict=_strict,
+                allow_complex_guards_as_runtime_asserts=True,
+            )
+            ep.module()(torch.randn(8), torch.tensor(5))
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Runtime assertion failed for expression Ne\(s0 \- 2\*u[\d], 0\)",  # strict/non-strict difference in u0/u1
+            ):  # fail only at runtime
+                ep.module()(torch.randn(12), torch.tensor(6))  # fail
 
     def test_constant_aliasing(self):
         class M1(torch.nn.Module):
