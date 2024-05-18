@@ -8,6 +8,7 @@
 #include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <torch/csrc/distributed/c10d/control_collectives/ControlCollectives.hpp>
 #include <torch/csrc/distributed/c10d/control_collectives/StoreCollectives.hpp>
+#include <torch/csrc/distributed/c10d/control_plane/WorkerServer.hpp>
 #include <vector>
 #ifndef _WIN32
 #include <torch/csrc/distributed/c10d/HashStore.hpp>
@@ -3122,6 +3123,11 @@ such as `dist.all_reduce(tensor, async_op=True)`.
     return py::bytes(::c10d::dump_nccl_trace());
   });
 #endif
+
+  py::class_<
+      ::c10d::control_plane::WorkerServer>(module, "_WorkerServer", R"(
+)")
+      .def(py::init<std::string>());
   Py_RETURN_TRUE;
 }
 
