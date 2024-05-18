@@ -84,11 +84,11 @@ from .trace_rules import is_numpy
 from .types import BytecodeHook
 from .utils import (
     CleanupManager,
-    CompilationMetrics,
     counters,
     dynamo_timed,
     format_bytecode,
     frame_phase_timing,
+    FwdCompilationMetrics,
     gen_record_file_name,
     increment_frame,
     is_namedtuple,
@@ -883,7 +883,8 @@ def _compile(
                 # If compilation failed, the entire time is wasted
                 dynamo_time_before_restart = time.time() - start_time
 
-            metrics = CompilationMetrics(
+            metrics = FwdCompilationMetrics(
+                str(compile_id),
                 frame_key,
                 code.co_name,
                 code.co_filename,
