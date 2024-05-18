@@ -955,7 +955,7 @@ def _export(
     strict: bool = True,
     preserve_module_call_signature: Tuple[str, ...] = (),
     pre_dispatch: bool = False,
-    allow_complex_guards_as_runtime_asserts: Optional[bool] = False,
+    allow_complex_guards_as_runtime_asserts: bool = False,
     _is_torch_jit_trace: bool = False,
 ) -> ExportedProgram:
     """

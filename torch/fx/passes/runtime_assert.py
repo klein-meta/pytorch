@@ -85,7 +85,7 @@ def insert_deferred_runtime_asserts(
         if ras.expr not in ras_exprs:
             new_ras.append(ras)
             ras_exprs.add(ras.expr)
-    ras_by_symbol[None] = new_ras  # type: ignore[call-overload]
+    ras_by_symbol[None] = new_ras  # type: ignore[index]
 
     # We are going to mutate the dict
     symbol_to_proxy: Dict[sympy.Symbol, fx.Proxy] = {}

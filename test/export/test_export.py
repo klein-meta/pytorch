@@ -4831,7 +4831,9 @@ def forward(self, x, y):
                 RuntimeError,
                 r"Runtime assertion failed for expression Eq\(s0\*s1 \- s2\*s3, 0\) on node 'eq'",
             ):  # fail only at runtime
-                ep.module()(torch.randn(5, 8), torch.randn(4, 5), torch.randn(30))  # fail
+                ep.module()(
+                    torch.randn(5, 8), torch.randn(4, 5), torch.randn(30)
+                )  # fail
 
         # case 3: 3d reshape (previously failing with different issue)
         class Reshape3d(torch.nn.Module):
