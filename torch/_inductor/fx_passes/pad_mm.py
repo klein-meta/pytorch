@@ -55,33 +55,34 @@ def check_dtype(a: Tensor, b: Tensor) -> bool:
     return a.is_floating_point() and b.is_floating_point()
 
 
+# It's fine we have symbolic shapes or strides as long as they
+# have hints. Later, we will make sure we only pad non-symbolic dimensions.
+def valid_shape_and_stride(t: Optional[Tensor]) -> bool:
+    if t is None:
+        return True
+
+    symbolic_cnt = 0
+    for x in t.size():
+        if isinstance(x, int):
+            continue
+        elif utils.is_symbolic(x):
+            if not x.node.has_hint():
+                return False
+            symbolic_cnt += 1
+        else:
+            return False
+    # filter out cases where all dimentions are symbolic
+    if symbolic_cnt == len(t.size()):
+        return False
+    return all(
+        isinstance(x, int) or (utils.is_symbolic(x) and x.node.has_hint())
+        for x in t.stride()
+    )
+
+
 def should_pad_common(
     mat1: Tensor, mat2: Tensor, input: Optional[Tensor] = None
 ) -> bool:
-    # It's fine we have symbolic shapes or strides as long as they
-    # have hints. Later, we will make sure we only pad non-symbolic dimensions.
-    def valid_shape_and_stride(t: Optional[Tensor]) -> bool:
-        if t is None:
-            return True
-
-        symbolic_cnt = 0
-        for x in t.size():
-            if isinstance(x, int):
-                continue
-            elif utils.is_symbolic(x):
-                if not x.node.has_hint():
-                    return False
-                symbolic_cnt += 1
-            else:
-                return False
-        # filter out cases where all dimentions are symbolic
-        if symbolic_cnt == len(t.size()):
-            return False
-        return all(
-            isinstance(x, int) or (utils.is_symbolic(x) and x.node.has_hint())
-            for x in t.stride()
-        )
-
     return (
         torch._inductor.config.shape_padding
         and check_device(mat1, mat2)
@@ -281,6 +282,21 @@ def get_non_view_def(node):
     return node
 
 
+def realize_symbols(ds):
+    return [d if isinstance(d, int) else d.node.hint for d in ds]
+
+
+def realize_tensor(t):
+    if isinstance(t, FakeTensor):
+        size_hints = realize_symbols(t.size())
+        stride_hint = realize_symbols(t.stride())
+        real_size = sum((d - 1) * s for d, s in zip(size_hints, stride_hint)) + 1
+        real_t = torch.randn(real_size, dtype=t.dtype, device=t.device)
+        return torch.as_strided(real_t, size_hints, stride_hint)
+    else:
+        return torch.randn_like(t)
+
+
 def should_exclude_padding_time(match, arg_name):
     node_def = get_non_view_def(match.kwargs[arg_name])
 
@@ -326,9 +342,6 @@ def should_pad_bench(
         if m_padded_length == k_padded_length == n_padded_length == 0:
             return False
 
-        def realize_symbols(ds):
-            return [d if isinstance(d, int) else d.node.hint for d in ds]
-
         if any(
             dim == 0
             for dim in itertools.chain(
@@ -353,18 +366,6 @@ def should_pad_bench(
         cached_pad = get_cached_should_pad(key)
         if cached_pad is not None:
             return cached_pad
-
-        def realize_tensor(t):
-            if isinstance(t, FakeTensor):
-                size_hints = realize_symbols(t.size())
-                stride_hint = realize_symbols(t.stride())
-                real_size = (
-                    sum((d - 1) * s for d, s in zip(size_hints, stride_hint)) + 1
-                )
-                real_t = torch.randn(real_size, dtype=t.dtype, device=t.device)
-                return torch.as_strided(real_t, size_hints, stride_hint)
-            else:
-                return torch.randn_like(t)
 
         mat1 = realize_tensor(mat1)
         mat2 = realize_tensor(mat2)
