@@ -1,13 +1,13 @@
 #pragma once
 
+#ifdef USE_C10D_NCCL
+
 #if defined(__linux__)
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #endif
-
-#ifdef USE_C10D_NCCL
 
 #include <atomic>
 #include <chrono>
@@ -100,11 +100,7 @@ static std::vector<std::string> TORCH_NCCL_WAIT_TIMEOUT_DUMP_MILSEC = {
 static std::vector<std::string> TORCH_NCCL_COORD_CHECK_MILSEC = {
     "TORCH_NCCL_COORD_CHECK_MILSEC"};
 
-// Whether to abort the communicators when users call destroy_process_group().
-// If yes, communicators will be aborted when destroy_process_group is called,
-// but not in destructor.
-static std::vector<std::string> TORCH_NCCL_ABORT_IN_DESTROY_PG = {
-    "TORCH_NCCL_ABORT_IN_DESTROY_PG"};
+static std::vector<std::string> TORCH_NCCL_NAN_CHECK = {"TORCH_NCCL_NAN_CHECK"};
 
 constexpr const char* NCCL_BACKEND_NAME = "nccl";
 
@@ -254,7 +250,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
         OpType opType,
         uint64_t seq,
         const char* profilingTitle = nullptr,
-        const c10::optional<std::vector<at::Tensor>>& inputs = c10::nullopt,
+        const std::optional<std::vector<at::Tensor>>& inputs = c10::nullopt,
         bool desyncDebug = false,
         bool enableTiming = false,
         DebugLevel distDebugLevel = DebugLevel::Off);
@@ -311,7 +307,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
     // and False otherwise.
     // In case of timeout, set exception on the WorkNCCL object.
     bool checkTimeout(
-        c10::optional<std::chrono::milliseconds> timeout = c10::nullopt);
+        std::optional<std::chrono::milliseconds> timeout = c10::nullopt);
 
     std::vector<at::Tensor> result() override;
 
@@ -405,7 +401,7 @@ class TORCH_API ProcessGroupNCCL : public Backend {
     bool timingEnabled_;
     // unique id used to tell the trace buffer that this
     // work has completed
-    c10::optional<uint64_t> trace_id_;
+    std::optional<uint64_t> trace_id_;
     DebugLevel distDebugLevel_;
     friend class ProcessGroupNCCL;
   };
@@ -627,16 +623,16 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // Helper function for iteratively aborting communicators in the provided map
   void abortCommsFromMap(
       std::unordered_map<std::string, std::shared_ptr<NCCLComm>>& ncclCommsMap,
-      c10::optional<std::string> abortReason);
+      std::optional<std::string> abortReason);
 
   c10::intrusive_ptr<intra_node_comm::IntraNodeComm> initIntraNodeComm();
 
   // Provides an API to abort the ProcessGroup (similar to ncclCommAbort)
   // instead of relying on ProcessGroupNCCL destructor.
   // return true if abort is successful, otherwise false
-  bool abort(c10::optional<std::string> abortReason = c10::nullopt);
+  bool abort(std::optional<std::string> abortReason = c10::nullopt);
 
-  void shutdown(c10::optional<std::string> reason = c10::nullopt);
+  void shutdown(std::optional<std::string> reason = c10::nullopt);
 
   void eagerConnectSingleDevice(at::Device device) override;
 
@@ -1015,11 +1011,6 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // for the operation to complete.
   bool blockingWait_ = false;
 
-  // Whether to abort the communicators when users call destroy_process_group().
-  // If yes, communicators will be aborted when destroy_process_group is called,
-  // but not in destructor.
-  bool abortInDestroyProcessGroup_ = false;
-
   // Whether or not to hook the cache allocator to register all allocated
   // tensors
   bool useTensorRegisterAllocatorHook_ = false;
@@ -1034,6 +1025,9 @@ class TORCH_API ProcessGroupNCCL : public Backend {
   // Whether or not to dump debug info on exception including both watchdog
   // timeout and nccl errors.
   bool dumpOnException_;
+
+  // Whether or not to enable nan check for input tensors to collectives.
+  bool enableNanCheck_;
 
   // Whether or not to create start CUDAEvent and enable timing for start
   // and end events. Note that enableTiming_ is always true if desyncDebug_
@@ -1101,10 +1095,11 @@ class TORCH_API ProcessGroupNCCL : public Backend {
 TORCH_API std::string dump_nccl_trace();
 
 // Gets a mutable reference to a global optional function.  Heartbeat Monitor
-// will query this function and if available, call it to dump traces. Inside
-// fbcode, we store a function here that uses an internal tool for process
-// tracing
-TORCH_API c10::optional<std::function<std::string()>>& get_cpp_trace_dumper();
+// will use this function to dump traces, if available. Inside fbcode, we store
+// a function here that uses an internal tool for process tracing
+TORCH_API std::optional<
+    std::function<void(std::function<void(const std::string&)>)>>&
+get_cpp_trace_dumper();
 
 // Similar to get_cpp_trace_dumper, this stores a function defined in
 // torch-python layer that lets us check whether the GIL can be acquired,
