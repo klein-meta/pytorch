@@ -1724,7 +1724,7 @@ class TritonKernel(SIMDKernel):
 
     def codegen_kernel_benchmark(self, num_gb, grid=None):
         result = IndentedBuffer()
-        argdefs, call_args, signature = self.args.python_argdefs()
+        argdefs, call_args, signature, _ = self.args.python_argdefs()
 
         result.writelines(["", "", "def get_args():"])
         with result.indent():
@@ -1830,6 +1830,68 @@ class TritonKernel(SIMDKernel):
             )
         )
 
+    def estimate_kernel_num_bytes(self):
+        """
+        Try the best to estimate the total size (in bytes) of the
+        kernel's inputs and outputs, which is used for estimating the memory
+        throughput of this kernel. This information is used for checking how
+        far we are from the peak memory bandwidth. It's important that
+        we want to avoid overestimating the sizes of the inputs and outputs,
+        because it can wrongfully give us a very large memory traffic value,
+        which may be even larger than the theoretical bandwidth and thus
+        become very misleading. This is particularly problematic for cases
+        where we slice some inputs. In those cases, we should only count
+        the size of the "slices" instead of the original inputs, because
+        only the slices contribute to the real memory traffic.
+        """
+        nbytes = []
+        ninplace_args = len(unique(self.args.inplace_buffers.values()))
+        _, call_args, _, _ = self.args.python_argdefs()
+
+        # For pointwise and reduction kernels, this is the upper-bound numels
+        # for the output buffer.
+        # FIXME: This is not exactly right for cases like below:
+        #    def foo(tensor0, tensor1):
+        #        x0 = narrow(tensor0)
+        #        return cat(x0, tensor1)
+        # For this example, we will end up overestimate the size for the
+        # slice s0. Potentially, we could have precise inputs information
+        # if we maintained the original inputs of the Pointwise kernel created
+        # for the "cat". However, I think it might be a bit overwhelming that
+        # we add such complexity only for handling some particular cases for
+        # benchmarking.
+        out_numel = V.graph.sizevars.size_hint(sympy_product(self.numels))
+        for i, arg in enumerate(call_args):
+            # "buf" may be narrowed. In this case, the number of memory accesses
+            # should be estimated based on the reinterpreted layout.
+            # On the other hand, buf may be broadcasted. In this case,
+            # counting the size of the underline storage would give us
+            # a better estimation in terms of memory accesses.
+            if arg not in self.buf_accesses:
+                nbytes.append(0)
+                continue
+            arg_numel = V.graph.get_numel(arg)
+            buf_size = V.graph.sizevars.size_hint(arg_numel)
+            if buf_size > out_numel:
+                # This arg points to a buf that has been sliced.
+                # We need to count each individual slice to have
+                # a better estimation.
+                indices: Set[Any] = set()
+                no_index_dep_count = 0
+                for dep in self.buf_accesses[arg]:
+                    if isinstance(dep, (StarDep, WeakDep)):
+                        indices.add(f"no_index_dep_{no_index_dep_count}")
+                        no_index_dep_count += 1
+                    else:
+                        indices.add(dep.index)
+                numel = len(indices) * out_numel
+            else:
+                numel = buf_size
+            dtype = V.graph.get_dtype(arg)
+            dtype_size = get_dtype_size(dtype)
+            nbytes.append(numel * dtype_size * (1 + int(i < ninplace_args)))
+        return sum(nbytes)
+
     def _get_heuristic(self):
         if self.persistent_reduction:
             assert self.inside_reduction
@@ -1909,7 +1971,7 @@ class TritonKernel(SIMDKernel):
             if config.benchmark_kernel:
                 code.splice(self.imports_for_benchmark_kernel())
 
-        argdefs, _, signature = self.args.python_argdefs()
+        argdefs, _, signature, _ = self.args.python_argdefs()
         # maps actual expression to SizeArg if it is in sizevars replacements
         for i, arg in enumerate(signature):
             if isinstance(arg, SizeArg):
@@ -2078,7 +2140,7 @@ class TritonKernel(SIMDKernel):
     def _get_grid_fn(self):
         return "grid"
 
-    def add_numel_to_call_args_and_grid(self, name, call_args, grid):
+    def add_numel_to_call_args_and_grid(self, name, call_args, arg_types, grid):
         # TODO(jansel): if there are constants, we shouldn't bother passing them as args
         for tree in self.range_trees:
             if isinstance(tree.numel, (sympy.Integer, sympy.Symbol)):
@@ -2088,23 +2150,25 @@ class TritonKernel(SIMDKernel):
 
             if tree.prefix != "r" or self.inside_reduction:
                 call_args.append(expr)
+                arg_types.append(type(expr))
             if tree.grid_dim is not None:
                 grid.append(expr)
 
     def get_call_args(self):
-        _, call_args, _ = self.args.python_argdefs()
+        # arg_types is needed for cpp wrapper codegen
+        _, call_args, _, arg_types = self.args.python_argdefs()
         # dynamo wraps unspec variable as 0d CPU tensor, need convert to scalar
         for i in range(len(call_args)):
             if V.graph.is_unspec_arg(call_args[i]):
                 call_args[i] = call_args[i] + ".item()"
 
-        return call_args
+        return call_args, arg_types
 
     def call_kernel(self, name: str, node: Optional[IRNode] = None):
         wrapper = V.graph.wrapper_code
-        call_args = self.get_call_args()
+        call_args, arg_types = self.get_call_args()
         grid: List[Any] = []
-        self.add_numel_to_call_args_and_grid(name, call_args, grid)
+        self.add_numel_to_call_args_and_grid(name, call_args, arg_types, grid)
         current_device = V.graph.scheduler.current_device
 
         if self.args.workspace_arg is not None:
@@ -2121,6 +2185,7 @@ class TritonKernel(SIMDKernel):
             current_device.index,
             cuda=True,
             triton=True,
+            arg_types=arg_types,
             grid_fn=self._get_grid_fn(),
             triton_meta=self.triton_meta,
         )
@@ -2130,13 +2195,78 @@ class TritonKernel(SIMDKernel):
 
     def codegen_nan_check(self):
         wrapper = V.graph.wrapper_code
-        _, call_args, arg_types = self.args.python_argdefs()
+        _, call_args, arg_types, _ = self.args.python_argdefs()
         for arg, arg_type in zip(call_args, arg_types):
             if isinstance(arg_type, TensorArg):
                 line = f"assert not {arg}.isnan().any().item()"
                 wrapper.writeline(line)
                 line = f"assert not {arg}.isinf().any().item()"
                 wrapper.writeline(line)
+
+    def warn_mix_layout(self, kernel_name):
+        """
+        Print message if the kernel have mixed layout inputs.
+        Only care about 4D tensor for now.
+        """
+        if (
+            len(self.args.input_buffers) == 1
+            and len(self.args.output_buffers) == 1
+            and len(self.args.inplace_buffers) == 0
+        ):
+            # even if input buffer and output buffer have different layout,
+            # this can be a layout conversion kernel. No need to warn for
+            # the mix layouts.
+            return
+
+        argdefs, call_args, signature, _ = self.args.python_argdefs()
+        uniform_stride_order = None
+        for arg_name in call_args:
+            buf = V.graph.get_buffer(arg_name)
+            if buf and len(buf.layout.size) == 4:
+                # ignore the tensor if only 1 dimension is non-zero
+                if len([x for x in buf.layout.size if x == 1]) == 3:
+                    continue
+                stride_order = ir.get_stride_order(buf.layout.stride)
+                if uniform_stride_order is None:
+                    uniform_stride_order = stride_order
+                elif uniform_stride_order != stride_order:
+                    msg = yellow_text(
+                        f"Expected stride order {uniform_stride_order}, but found stride order"
+                        + f" {stride_order} for kernel {kernel_name}"
+                    )
+                    log.warning(msg)
+
+                    stride_order_list = [
+                        ir.get_stride_order(V.graph.get_buffer(name).layout.stride)
+                        if V.graph.get_buffer(name)
+                        else None
+                        for name in call_args
+                    ]
+                    size_list = [
+                        V.graph.get_buffer(name).layout.size
+                        if V.graph.get_buffer(name)
+                        else None
+                        for name in call_args
+                    ]
+                    source_list = [
+                        "GraphInput"
+                        if name in V.graph.graph_inputs
+                        else "IntermediateBuffer"
+                        if name in V.graph.name_to_buffer
+                        else None
+                        for name in call_args
+                    ]
+
+                    msg = yellow_text(
+                        f"  param names {argdefs}\n  buf names {call_args}\n  strides {stride_order_list}"
+                        + f"\n  sizes {size_list}\n  sources {source_list}\n"
+                    )
+                    log.warning(msg)
+                    return
+        msg = green_text(
+            f"All the inputs for the triton kernel {kernel_name} have uniform layout"
+        )
+        log.warning(msg)
 
     def create_cse_var(self, *args, **kwargs):
         return TritonCSEVariable(*args, **kwargs)
